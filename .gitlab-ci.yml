@@ -1,12 +1,13 @@
 stages:
   - build
   - test
+  - docker-test
   - deploy
   - report
 
 default:
   tags:
-    - internal-hall035
+    - swps-internal-hall035
 
 variables:
   OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4318"
@@ -42,6 +43,22 @@ test:
   image: armdocker.rnd.ericsson.se/dockerhub-ericsson-remote/golang:1.25
   script:
     - go test -v -cover ./...
+
+docker-test:
+  stage: docker-test
+  image: armdocker.rnd.ericsson.se/dockerhub-ericsson-remote/docker:latest
+  services:
+    - name: docker:dind
+      command: ["--tls=false"]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  before_script:
+    - docker info
+  script:
+    - echo "Testing Docker-in-Docker functionality"
+    - docker run --rm armdocker.rnd.ericsson.se/dockerhub-ericsson-remote/hello-world
+  allow_failure: true
 
 deploy:
   stage: deploy
