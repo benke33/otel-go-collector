@@ -9,8 +9,8 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
-	"gitlab.internal.ericsson.com/ewikhen/gitlab-otel-exporter/internal/config"
+	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
+	"github.com/benke33/gitlab-otel-exporter/internal/config"
 )
 
 // InitTracer initializes OpenTelemetry tracer with configuration

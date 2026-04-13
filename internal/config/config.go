@@ -1,6 +1,9 @@
 package config
 
-import "os"
+import (
+	"os"
+	"strings"
+)
 
 // Config holds all configuration for the exporter
 type Config struct {
@@ -31,12 +34,15 @@ func Load() *Config {
 	}
 }
 
-// GetEndpoint returns the configured endpoint or default for protocol
+// GetEndpoint returns the configured endpoint (host:port) stripped of any scheme
 func (c *Config) GetEndpoint() string {
-	if c.Endpoint != "" {
-		return c.Endpoint
+	ep := c.Endpoint
+	if ep == "" {
+		return getDefaultEndpoint(c.Protocol)
 	}
-	return getDefaultEndpoint(c.Protocol)
+	ep = strings.TrimPrefix(ep, "http://")
+	ep = strings.TrimPrefix(ep, "https://")
+	return ep
 }
 
 func getDefaultEndpoint(protocol string) string {
