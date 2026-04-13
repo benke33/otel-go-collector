@@ -8,25 +8,25 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
-	"gitlab.internal.ericsson.com/ewikhen/gitlab-otel-exporter/internal/gitlab"
+	"github.com/benke33/gitlab-otel-exporter/internal/gitlab"
 )
 
 // ExtractParentContext extracts trace context from parent pipeline
 func ExtractParentContext(ctx context.Context, gitClient *gitlab.Client, pipeline *gitlab.PipelineData) context.Context {
-	// Check if this pipeline was triggered by another pipeline
-	if os.Getenv("CI_PIPELINE_SOURCE") != "pipeline" && os.Getenv("CI_PIPELINE_SOURCE") != "trigger" {
-		return ctx
-	}
-
-	// Look for parent pipeline trace context in variables
+	// Look for parent pipeline trace context in variables (check TRACEPARENT first)
 	if traceParent := os.Getenv("TRACEPARENT"); traceParent != "" {
 		carrier := propagation.MapCarrier{"traceparent": traceParent}
 		return otel.GetTextMapPropagator().Extract(ctx, carrier)
 	}
 
+	// Check if this pipeline was triggered by another pipeline
+	if os.Getenv("CI_PIPELINE_SOURCE") != "pipeline" && os.Getenv("CI_PIPELINE_SOURCE") != "trigger" {
+		return ctx
+	}
+
 	// Try to extract from pipeline variables if available
 	projectID := os.Getenv("CI_PROJECT_ID")
-	pipelineID, _ := strconv.Atoi(os.Getenv("CI_PIPELINE_ID"))
+	pipelineID, _ := strconv.ParseInt(os.Getenv("CI_PIPELINE_ID"), 10, 64)
 
 	if variables, _, err := gitClient.GetClient().Pipelines.GetPipelineVariables(projectID, pipelineID, nil); err == nil {
 		for _, v := range variables {

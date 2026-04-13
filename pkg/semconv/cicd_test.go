@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	gitlab "gitlab.com/gitlab-org/api/client-go"
-	gitlabpkg "gitlab.internal.ericsson.com/ewikhen/gitlab-otel-exporter/internal/gitlab"
+	gitlabpkg "github.com/benke33/gitlab-otel-exporter/internal/gitlab"
 )
 
 func TestRefType(t *testing.T) {
@@ -20,8 +20,9 @@ func TestRefType(t *testing.T) {
 	for _, tt := range tests {
 		_ = os.Setenv("CI_COMMIT_TAG", tt.tag)
 		defer func() { _ = os.Unsetenv("CI_COMMIT_TAG") }()
-		if got := RefType(); got != tt.want {
-			t.Errorf("RefType() = %q, want %q", got, tt.want)
+		got := refHeadType()
+		if got.Value.AsString() != tt.want {
+			t.Errorf("refHeadType() = %q, want %q", got.Value.AsString(), tt.want)
 		}
 	}
 }
@@ -42,8 +43,8 @@ func TestTriggerType(t *testing.T) {
 	for _, tt := range tests {
 		_ = os.Setenv("CI_PIPELINE_SOURCE", tt.source)
 		defer func() { _ = os.Unsetenv("CI_PIPELINE_SOURCE") }()
-		if got := TriggerType(); got != tt.want {
-			t.Errorf("TriggerType() with source %q = %q, want %q", tt.source, got, tt.want)
+		if got := triggerType(); got != tt.want {
+			t.Errorf("triggerType() with source %q = %q, want %q", tt.source, got, tt.want)
 		}
 	}
 }
@@ -55,8 +56,8 @@ func TestPipelineAttributes(t *testing.T) {
 	defer func() { _ = os.Unsetenv("CI_PIPELINE_ID") }()
 
 	attrs := PipelineAttributes()
-	if len(attrs) != 7 {
-		t.Errorf("PipelineAttributes() returned %d attributes, want 7", len(attrs))
+	if len(attrs) < 8 {
+		t.Errorf("PipelineAttributes() returned %d attributes, want at least 8", len(attrs))
 	}
 }
 
@@ -117,17 +118,17 @@ func TestParentPipelineAttributes(t *testing.T) {
 	found := map[string]bool{}
 	for _, attr := range attrs {
 		switch attr.Key {
-		case "cicd.pipeline.parent.id":
+		case "gitlab.pipeline.parent.id":
 			if attr.Value.AsString() != "123" {
 				t.Errorf("parent.id should be 123, got %s", attr.Value.AsString())
 			}
 			found["parent.id"] = true
-		case "cicd.pipeline.parent.project.id":
+		case "gitlab.pipeline.parent.project.id":
 			if attr.Value.AsString() != "456" {
 				t.Errorf("parent.project.id should be 456, got %s", attr.Value.AsString())
 			}
 			found["parent.project.id"] = true
-		case "cicd.pipeline.trigger.user.id":
+		case "gitlab.pipeline.trigger.user.id":
 			if attr.Value.AsString() != "789" {
 				t.Errorf("trigger.user.id should be 789, got %s", attr.Value.AsString())
 			}

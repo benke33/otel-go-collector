@@ -1,71 +1,93 @@
 # GitLab OpenTelemetry Exporter
 
-A minimal OpenTelemetry exporter for GitLab CI/CD pipelines that exports traces following the [CI/CD semantic conventions](https://opentelemetry.io/docs/specs/semconv/cicd/cicd-spans/).
+A minimal OpenTelemetry exporter for GitLab CI/CD pipelines that exports traces and correlated logs following the [CI/CD semantic conventions](https://opentelemetry.io/docs/specs/semconv/cicd/).
 
 ## Features
 
-- Fetches all pipeline jobs via GitLab API using official GitLab Go SDK
-- Creates one span per job/stage in the pipeline
-- Exports traces to OTLP HTTP endpoint with parent-child relationships
-- Follows OpenTelemetry CI/CD semantic conventions
-- **Downstream pipeline correlation** - automatically links triggered pipelines to parent traces
-- Runs in `.post` stage (executes regardless of pipeline status)
-- Real-time console output with progress indicators
-- Debug mode to print all span attributes
+- Exports traces and logs to any OTLP-compatible backend (SigNoz, Jaeger, etc.)
+- **Trace-log correlation** — logs are emitted within span context for automatic correlation in observability UIs
+- **Full job log capture** — fetches complete job output from GitLab API and sends as correlated log records
+- **Root span support** — creates root span in `.pre` stage for proper trace hierarchy across all pipeline stages
+- **Downstream pipeline correlation** — automatically links triggered pipelines to parent traces via TRACEPARENT propagation
+- Follows [OpenTelemetry CI/CD semantic conventions v1.40.0](https://opentelemetry.io/docs/specs/semconv/cicd/)
+- Parent-child span relationships between pipeline and job spans
+- Span links for cross-trace references
+- Pipeline and task result attributes (`cicd.pipeline.result`, `cicd.pipeline.task.run.result`)
 - Comprehensive metadata export (all GitLab API data flattened as span attributes)
 - ANSI escape code stripping for clean attribute values
-- Written in Go 1.25 with best practices
+- Supports HTTP, gRPC, and stdout OTLP protocols
+- Written in Go 1.26
 
-## Installation
+## Quick Start
 
 ```bash
-go mod download
-go build -o gitlab-otel-exporter cmd/main.go
+make build
+make test
 ```
 
 ## Usage
 
-### GitLab CI/CD Integration
+### Pre-built Docker Image
 
-The exporter runs automatically in your pipeline via the `otel-export` job in the `.post` stage:
+The recommended way to run the exporter in CI is using the pre-built Docker image:
 
 ```yaml
 variables:
-  OTEL_EXPORTER_OTLP_ENDPOINT: "your-collector:4318"
-  OTEL_EXPORTER_OTLP_PROTOCOL: "http"  # http, grpc, or stdout
+  OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4318"
+
+otel-init:
+  stage: .pre
+  image: armdocker.rnd.ericsson.se/proj-bosgitops/gitlab-otel-exporter:latest
+  script:
+    - export GITLAB_TOKEN=${GITLAB_SECRET_TOKEN}
+    - export GITLAB_SERVER_URL=https://gitlab.example.com
+    - gitlab-otel-exporter --create-root-span | tee root_trace.log
+    - grep TRACE_PARENT root_trace.log > root_trace.env || echo "TRACE_PARENT=" > root_trace.env
+  artifacts:
+    reports:
+      dotenv: root_trace.env
+  when: always
+  allow_failure: true
 
 otel-export:
   stage: .post
-  image: golang:1.25
+  image: armdocker.rnd.ericsson.se/proj-bosgitops/gitlab-otel-exporter:latest
+  dependencies:
+    - otel-init
   script:
-    - export GITLAB_TOKEN=${CI_JOB_TOKEN}
-    - go run cmd/main.go
+    - export GITLAB_TOKEN=${GITLAB_SECRET_TOKEN}
+    - export GITLAB_SERVER_URL=https://gitlab.example.com
+    - gitlab-otel-exporter --use-root-span=$TRACE_PARENT
   when: always
   allow_failure: true
 ```
 
-The `.post` stage ensures the exporter runs after all other stages complete, regardless of pipeline success or failure. The exporter uses `CI_JOB_TOKEN` to authenticate with the GitLab API and fetch all pipeline jobs.
+### Environment Variables
+
+| Variable | Description | Required |
+|---|---|---|
+| `GITLAB_TOKEN` | GitLab API token with `read_api` scope | Yes |
+| `GITLAB_SERVER_URL` | GitLab server URL (falls back to `CI_SERVER_URL`) | No |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector endpoint (host:port) | Yes |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | Protocol: `http` (default), `grpc`, or `stdout` | No |
+| `DEBUG` | Set to `true` for debug output | No |
+
+### Root Span Mode
+
+The exporter supports a two-phase approach for proper trace hierarchy:
+
+1. **`.pre` stage** — `--create-root-span` creates a root span before any jobs run and outputs a `TRACE_PARENT` value
+2. **`.post` stage** — `--use-root-span=<traceparent>` uses the root span as parent, ensuring all job spans share the same trace ID
+
+The `.post` job uses `dependencies` (not `needs`) to receive the dotenv artifact from the `.pre` job. This ensures proper stage ordering without bypassing the pipeline DAG.
 
 ### Downstream Pipeline Correlation
 
-For pipelines that trigger other pipelines, trace context is automatically propagated using GitLab's `trigger` keyword:
+Trace context is propagated to downstream pipelines using GitLab's `trigger` keyword:
 
 ```yaml
-# First run the exporter to generate trace context
-otel-export:
-  stage: .post
-  script:
-    - export GITLAB_TOKEN=${CI_JOB_TOKEN}
-    - go run cmd/main.go | grep TRACE_PARENT > trace.env
-    - source trace.env
-  artifacts:
-    reports:
-      dotenv: trace.env
-
-# Then trigger downstream with trace context
 trigger-downstream:
   stage: deploy
-  needs: ["otel-export"]
   trigger:
     project: group/downstream-project
     branch: main
@@ -75,111 +97,91 @@ trigger-downstream:
 ```
 
 The exporter automatically detects and correlates downstream pipelines when:
-- `CI_PIPELINE_SOURCE` is "pipeline" or "trigger"
 - `TRACEPARENT` environment variable is present
-- GitLab automatically provides `CI_PARENT_PIPELINE_ID` and `CI_PARENT_PROJECT_ID`
+- `CI_PIPELINE_SOURCE` is "pipeline" or "trigger"
 
 ### Protocol Configuration
 
-Supports three OTLP protocols:
-
 ```yaml
 # HTTP (default) - port 4318
-variables:
-  OTEL_EXPORTER_OTLP_PROTOCOL: "http"
-  OTEL_EXPORTER_OTLP_ENDPOINT: "collector:4318"
+OTEL_EXPORTER_OTLP_PROTOCOL: "http"
+OTEL_EXPORTER_OTLP_ENDPOINT: "collector:4318"
 
 # gRPC - port 4317
-variables:
-  OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
-  OTEL_EXPORTER_OTLP_ENDPOINT: "collector:4317"
+OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+OTEL_EXPORTER_OTLP_ENDPOINT: "collector:4317"
 
 # Console/stdout - for debugging
-variables:
-  OTEL_EXPORTER_OTLP_PROTOCOL: "stdout"
+OTEL_EXPORTER_OTLP_PROTOCOL: "stdout"
 ```
 
-### Debug Mode
+The endpoint can be specified with or without the `http://` scheme — it will be stripped automatically.
 
-Enable debug mode to print all span attributes:
+## Trace-Log Correlation
 
-```yaml
-otel-export:
-  stage: .post
-  script:
-    - export GITLAB_TOKEN=${CI_JOB_TOKEN}
-    - export DEBUG=true
-    - go run cmd/main.go
+The exporter sends logs via the OpenTelemetry Log SDK with automatic trace correlation. Each job span emits a correlated log record containing:
+
+- **Body**: Full job trace output (complete CI job console log)
+- **Attributes**: `cicd.pipeline.task.name`, `cicd.pipeline.task.run.id`, `gitlab.job.stage`
+- **Correlation**: Automatic via span context — `trace_id` and `span_id` are set by the OTel SDK
+
+In SigNoz, this enables clicking from a trace to see the full job logs, and from logs back to the originating trace.
+
+## Exported Attributes
+
+All attributes follow the [OpenTelemetry CI/CD semantic conventions v1.40.0](https://opentelemetry.io/docs/specs/semconv/cicd/) where available. GitLab-specific attributes that are not part of the spec use the `gitlab.*` namespace.
+
+### Pipeline Span
+
+| Attribute | Source | Description |
+|---|---|---|
+| `cicd.pipeline.name` | Spec | Pipeline name or project path |
+| `cicd.pipeline.run.id` | Spec | Pipeline ID |
+| `cicd.pipeline.run.url.full` | Spec | Pipeline URL |
+| `cicd.pipeline.result` | Spec | Pipeline result (`success`, `failure`, `error`, `cancellation`, `skip`) |
+| `vcs.repository.url.full` | Spec | Repository URL |
+| `vcs.ref.head.name` | Spec | Branch or tag name |
+| `vcs.ref.head.revision` | Spec | Commit SHA |
+| `vcs.ref.head.type` | Spec | Reference type (`branch` or `tag`) |
+| `gitlab.pipeline.trigger.type` | GitLab | Trigger type (scm.push, scm.pull_request, schedule, other_pipeline, manual) |
+| `gitlab.pipeline.trigger.user` | GitLab | User who triggered the pipeline |
+| `gitlab.pipeline.parent.id` | GitLab | Parent pipeline ID (downstream only) |
+| `gitlab.pipeline.parent.project.id` | GitLab | Parent project ID (downstream only) |
+
+### Job Span
+
+| Attribute | Source | Description |
+|---|---|---|
+| `cicd.pipeline.task.name` | Spec | Job name |
+| `cicd.pipeline.task.run.id` | Spec | Job ID |
+| `cicd.pipeline.task.run.url.full` | Spec | Job URL |
+| `cicd.pipeline.task.type` | Spec | Task type (`build`, `test`, `deploy`) |
+| `cicd.pipeline.task.run.result` | Spec | Task result (`success`, `failure`, `error`, `cancellation`, `skip`) |
+| `gitlab.job.stage` | GitLab | GitLab stage name |
+
+All GitLab API metadata is also flattened and included as span attributes.
+
+## Development
+
+### Make Targets
+
+```
+make build           Build the binary
+make test            Run tests with coverage
+make test-report     Run tests and generate JUnit XML report
+make lint            Run all linters (fmt + vet)
+make docker          Build Docker image
+make clean           Remove build artifacts
+make tidy            Tidy and verify dependencies
+make help            Show all targets
 ```
 
-### Console Output
-
-The exporter provides real-time feedback:
-
-```
-🚀 Starting GitLab OpenTelemetry Exporter
-📡 Connecting to OTLP endpoint: collector:4318
-📥 Fetching pipeline data from GitLab API...
-📋 Found 5 jobs in pipeline
-📤 Creating pipeline span: namespace/project #12345
-🔗 TRACE_PARENT=00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
-📤 Creating job spans...
-   ├─ Job: build (status: success)
-   ├─ Job: test (status: success)
-   ├─ Job: deploy (status: failed)
-✅ Traces exported successfully
-```
-
-The `TRACE_PARENT` value can be used in downstream pipeline triggers for trace correlation.
-
-### Trace Structure
-
-**Service Name:** `namespace/project` (e.g., `ewikhen/otel-go-collector`)
-
-**Root Span Name:** `namespace/project #pipelineID` (e.g., `ewikhen/otel-go-collector #12345`)
-
-**Job Span Name:** `Stage: job_name - job_id: 123`
-
-### Exported Attributes
-
-**Pipeline Span:**
-- `cicd.pipeline.name`
-- `cicd.pipeline.run.id`
-- `vcs.repository.url.full`
-- `vcs.repository.ref.name`
-- `vcs.repository.ref.revision`
-- `vcs.repository.ref.type`
-- `cicd.pipeline.trigger.type`
-- `cicd.pipeline.parent.id` (for downstream pipelines)
-- `cicd.pipeline.parent.project.id` (for downstream pipelines)
-- `cicd.pipeline.trigger.user.id` (for triggered pipelines)
-- All GitLab API pipeline metadata (flattened)
-
-**Job Span:**
-- `cicd.pipeline.task.name`
-- `cicd.pipeline.task.run.id`
-- `cicd.pipeline.task.run.url.full`
-- `cicd.pipeline.task.type`
-- `stage`
-- All GitLab API job metadata (flattened)
-
-## Docker
-
-### Using Dockerfile
+### Docker
 
 ```bash
 docker build -t gitlab-otel-exporter .
 docker run -e OTEL_EXPORTER_OTLP_ENDPOINT=collector:4318 gitlab-otel-exporter
 ```
-
-### Using Cloud Native Buildpacks
-
-```bash
-pack build gitlab-otel-exporter --builder paketobuildpacks/builder-jammy-base --trust-builder
-docker run -e OTEL_EXPORTER_OTLP_ENDPOINT=collector:4318 gitlab-otel-exporter
-```
-
-The project includes `project.toml` configuration for Paketo buildpacks with Go 1.25 support.
 
 ## License
 
